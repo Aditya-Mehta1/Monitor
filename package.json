@@ -1,0 +1,11 @@
+{
+  "name": "workspace-listener-demo",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@parcel/watcher": "2.6.0"
+  },
+  "devDependencies": {
+    "ws": "8.22.0"
+  }
+}
