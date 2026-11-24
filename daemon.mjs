@@ -2,8 +2,8 @@ import {mkdir, realpath} from 'node:fs/promises';
 import {join, parse, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {parseArgs} from 'node:util';
-import {Runtime} from './runtime.mjs';
-import {serve} from './server.mjs';
+import {Runtime} from './src/runtime.mjs';
+import {serve} from './src/server.mjs';
 
 const {values} = parseArgs({options: {
   state: {type: 'string'}, socket: {type: 'string'}, rules: {type: 'string'}, 'watch-root': {type: 'string'},
