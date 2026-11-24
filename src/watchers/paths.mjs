@@ -1,7 +1,7 @@
 import { watch as watchDirectory } from 'node:fs'
 import { lstat, readdir, realpath } from 'node:fs/promises'
 import { basename, dirname, join, sep } from 'node:path'
-import { forEachIO, prepareEvidence, saveFile, saveTree } from './evidence.mjs'
+import { forEachIO, prepareEvidence, saveFile, saveTree } from '../evidence.mjs'
 
 const MacStreams = process.platform === 'darwin' ? (await import('./macos.mjs')).MacStreams : null
 const MAX_ACTIVE_ROOTS = 8
@@ -295,15 +295,19 @@ export class Paths {
     const versions = []
     for (const path of observed) {
       const after = this.nodes.get(path)?.ref ?? null
+      const ids = []
       for (const watch of this.routes.get(path)?.watches ?? []) {
-        if (watch.evidence !== undefined && after !== watch.evidence) versions.push({ id: watch.id, after })
+        if (watch.evidence !== undefined && after !== watch.evidence) ids.push(watch.id)
       }
+      if (ids.length) versions.push({ ids, after })
     }
     if (!versions.length) return
     await this.onVersions(versions)
-    for (const { id, after } of versions) {
-      const watch = this.watches.get(id)
-      if (watch) watch.evidence = after
+    for (const { ids, after } of versions) {
+      for (const id of ids) {
+        const watch = this.watches.get(id)
+        if (watch) watch.evidence = after
+      }
     }
   }
 

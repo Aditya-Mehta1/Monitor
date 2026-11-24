@@ -1,9 +1,11 @@
 import {randomUUID} from 'node:crypto';
 import {EventEmitter} from 'node:events';
 import {resolve} from 'node:path';
-import {Paths} from './paths.mjs';
+import {Paths} from './watchers/paths.mjs';
+import {HttpsSources} from './watchers/https.mjs';
+import {readRecords} from './watchers/command.mjs';
 import {Store} from './store.mjs';
-import {executableRule, launch, readRecords, terminate} from './processes.mjs';
+import {executableRule, launch, terminate} from './processes.mjs';
 
 function argv(value, name) {
   if (!Array.isArray(value) || !value.length || !value[0] || !value.every(s => typeof s === 'string')) {
@@ -14,13 +16,18 @@ function argv(value, name) {
 
 function normalize(input, rules) {
   if ('command' in input || 'when' in input) throw new Error('Use stream instead of command and filter instead of when');
-  const {path, stream, cwd = process.cwd(), filter, until} = input;
-  if ((path === undefined) === (stream === undefined)) throw new Error('Supply exactly one path or stream');
+  const {source, path, stream, cwd = process.cwd(), filter, until} = input;
+  if ([source, path, stream].filter(v => v !== undefined).length !== 1) throw new Error('Supply exactly one source (or legacy path or stream)');
   const spec = {cwd: resolve(cwd)};
-  if (path !== undefined) {
-    if (!path || typeof path !== 'string') throw new Error('Expected a file or directory path');
-    spec.path = resolve(spec.cwd, path);
-  } else spec.stream = argv(stream, 'stream');
+  if (stream !== undefined || Array.isArray(source)) {
+    spec.stream = argv(stream ?? source, 'command');
+  } else if (typeof source === 'string' && /^[a-z][\w+.-]*:\/\//i.test(source)) {
+    spec.https = source.split('#', 1)[0];
+  } else {
+    const file = path ?? source;
+    if (!file || typeof file !== 'string') throw new Error('Expected a path, HTTPS URL, or command argument vector');
+    spec.path = resolve(spec.cwd, file);
+  }
   if (filter !== undefined) {
     if (typeof filter === 'string') {
       if (!Object.hasOwn(rules, filter) ||
@@ -42,7 +49,7 @@ function normalize(input, rules) {
 }
 
 export class Runtime extends EventEmitter {
-  constructor(state, rules, reconcileMs, ruleWorkers = 4, watchRoot = null) {
+  constructor(state, rules, reconcileMs, ruleWorkers = 4, watchRoot = null, httpsOptions = {}) {
     super();
     this.state = state;
     this.store = new Store(state);
@@ -55,16 +62,21 @@ export class Runtime extends EventEmitter {
       reconcileMs, watchRoot, onVersions: versions => this.captureVersions(versions),
       onError: error => console.error('Path capture:', error.message),
     });
+    this.https = new HttpsSources(state, {
+      ...httpsOptions, onVersion: (ids, after) => this.captureVersions([{ids, after}]),
+      onError: error => console.error('HTTPS capture:', error.message),
+    });
   }
 
   async listen(input) {
     if (this.closing) throw new Error('Listener is closing');
     const spec = normalize(input, this.rules);
     const id = randomUUID();
-    if (spec.path) {
-      const baseline = await this.paths.attach(id, spec.path);
+    if (!spec.stream) {
+      const snapshots = spec.https ? this.https : this.paths;
+      const baseline = await snapshots.attach(id, spec.https ?? spec.path);
       try { this.store.add(id, spec, baseline); }
-      catch (error) { this.paths.detach(id); throw error; }
+      catch (error) { snapshots.detach(id); throw error; }
     } else {
       const proc = await launch(spec.stream, spec.cwd);
       try { this.store.add(id, spec); }
@@ -78,9 +90,10 @@ export class Runtime extends EventEmitter {
   async restore() {
     for (const {id, state, spec, current} of this.store.restorable()) {
       if (this.expired(id, spec.expires)) continue;
-      if (state === 'active' && spec.path) {
-        const after = await this.paths.attach(id, spec.path, current);
-        if (current !== after) this.capture([{id, entries: [{after}]}]);
+      if (state === 'active' && !spec.stream) {
+        const snapshots = spec.https ? this.https : this.paths;
+        const after = await snapshots.attach(id, spec.https ?? spec.path, current);
+        if (current !== after) this.captureVersions([{ids: [id], after}]);
       } else if (state === 'active') {
         try { this.consume(id, await launch(spec.stream, spec.cwd)); }
         catch (error) { this.end(id, {error: error.message}); }
@@ -109,9 +122,9 @@ export class Runtime extends EventEmitter {
   }
 
   captureVersions(versions) {
-    // Share a commit across subscriptions observing the same physical update.
+    // Commit every subscriber to one snapshot together. Bound unrelated path updates per transaction.
     for (let i = 0; i < versions.length; i += 128) {
-      this.capture(versions.slice(i, i + 128).map(({id, after}) => ({id, entries: [{after}]})));
+      this.capture(versions.slice(i, i + 128).map(({ids, after}) => ({ids, entries: [{after}]})));
     }
   }
 
@@ -119,11 +132,13 @@ export class Runtime extends EventEmitter {
     if (this.closing) return;
     const writes = [];
     let filtered = false;
-    for (const {id, entries} of groups) {
-      const watch = this.store.get(id);
-      if (watch.state !== 'active' || this.expired(id, watch.spec.expires)) continue;
-      writes.push({watch, entries});
-      if (watch.spec.filter) filtered = true;
+    for (const {ids, entries} of groups) {
+      for (const id of ids) {
+        const watch = this.store.get(id);
+        if (watch.state !== 'active' || this.expired(id, watch.spec.expires)) continue;
+        writes.push({watch, entries});
+        if (watch.spec.filter) filtered = true;
+      }
     }
     if (!writes.length) return;
     for (const id of this.store.capture(writes)) this.emit('notice:' + id);
@@ -134,7 +149,7 @@ export class Runtime extends EventEmitter {
     this.producers.set(id, proc);
     proc.task = (async () => {
       try {
-        await readRecords(proc.child.stdout, this.state, entries => this.capture([{id, entries}]));
+        await readRecords(proc.child.stdout, this.state, entries => this.capture([{ids: [id], entries}]));
         const exit = await proc.closed;
         if (!this.closing) this.end(id, exit);
       } catch (error) {
@@ -158,10 +173,11 @@ export class Runtime extends EventEmitter {
     this.emit('notice:' + id);
     this.disarm(id);
     this.paths.detach(id);
+    const download = this.https.detach(id);
     const evaluation = this.evaluating.get(id);
     evaluation?.controller.abort();
     const proc = this.producers.get(id);
-    await Promise.all([evaluation?.task, proc && terminate(proc), proc?.task]);
+    await Promise.all([download, evaluation?.task, proc && terminate(proc), proc?.task]);
     return 'stopped';
   }
 
@@ -228,10 +244,12 @@ export class Runtime extends EventEmitter {
     }
   }
 
-  async close() {
+  async close(registrationsDrained) {
     this.closing = true;
     clearImmediate(this.scheduled);
     clearTimeout(this.retry);
+    // Abort pending HTTPS baselines before waiting for in-flight listen requests.
+    await Promise.all([this.https.close(), registrationsDrained]);
     for (const id of this.deadlines.keys()) this.disarm(id);
     const jobs = [...this.evaluating.values()];
     for (const job of jobs) job.controller.abort();
