@@ -14,9 +14,9 @@ At a high level, Monitor gives agents a runtime for a flexible loop:
 
 The agent points Monitor at a file, folder, URL, or any datastream [`source`], and writes a `filter `on the fly. A local daemon handles polling, saves every change to disk and pings the agent when the filter matches.
 
-> **[Video 1: Demo]**
->
-> *Pi using Monitor w an extension :)*
+https://github.com/user-attachments/assets/286d8ca0-735a-42f9-89fb-defcff1dd8f3
+
+*Pi uses Monitor to watch five sources at once. A dog appearing on the pet cam or an order over $10,000 wakes Pi after its turn ends.*
 
 ## How it works
 
