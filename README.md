@@ -16,7 +16,7 @@ The agent points Monitor at a file, folder, URL, or any datastream [`source`], a
 
 https://github.com/user-attachments/assets/286d8ca0-735a-42f9-89fb-defcff1dd8f3
 
-*Pi uses Monitor to watch five sources at once. A dog appearing on the pet cam or an order over $10,000 wakes Pi after its turn ends.*
+*Pi uses Monitor to watch five sources at once: including a "pet cam", BTC price and email inbox :)*
 
 ## How it works
 
