@@ -45,19 +45,35 @@ export async function serve(socketPath, runtime) {
         }
         case '/stop': result = await runtime.stop(watch); break;
         case '/replay': {
-          const changes = runtime.store.replay(watch, args.afterSeq, args.limit);
+          let changes;
+          if (args.newestFirst === true) {
+            changes = runtime.store.recentChanges(watch, args);
+            res.setHeader('Listener-Replay-Order', 'newest-first');
+          } else {
+            if (args.only !== undefined || args.seq !== undefined) throw new Error('Use newestFirst for history selectors');
+            changes = runtime.store.replay(watch, args.afterSeq, args.limit);
+          }
           res.setHeader('Content-Type', 'application/x-ndjson');
           res.flushHeaders();
           function* lines() { for (const change of changes) yield JSON.stringify(change) + '\n'; }
           await pipeline(Readable.from(lines()), res);
           return;
         }
+        case '/live':
         case '/wait':
         case '/poll': {
+          const live = req.url === '/live';
           const untilDone = req.url === '/wait' && args.untilDone === true;
-          const readPage = () => runtime.store.poll(watch, after, untilDone);
+          if (live && args.afterSeq === 'latest') {
+            // Anchor once at capture time, even if a filter for an older change is still running.
+            result = {notices: [], next: runtime.store.get(watch).seq};
+            break;
+          }
+          const readPage = live
+            ? () => runtime.store.live(watch, args.afterSeq)
+            : () => runtime.store.poll(watch, after, untilDone);
           result = readPage();
-          if (req.url === '/wait' && !result.notices.length && !result.done) {
+          if (req.url !== '/poll' && !result.notices.length && !result.done) {
             const event = 'notice:' + watch;
             const wake = () => res.end(JSON.stringify(readPage()));
             runtime.once(event, wake);

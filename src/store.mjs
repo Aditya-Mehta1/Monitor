@@ -12,9 +12,16 @@ function unpackWatch({ id, spec, state, current, seq, evaluated, due, exit_info 
   return { id, spec: saved, state, current, seq, pending, exitInfo: JSON.parse(exit_info) };
 }
 
-function unpackChange({ watch, seq, observed_at, before, after, record }) {
+function unpackChange({ watch, seq, observed_at, before, after, record, message }) {
   const identity = { watch, seq, observed_at };
+  if (message != null) identity.message = message;
   return record === null ? { ...identity, before, after } : { ...identity, record };
+}
+
+function noticePage(watch, notices, next, untilDone) {
+  const page = { notices, next };
+  if (untilDone && !notices.length && watch.state !== 'active' && watch.pending === null) page.done = true;
+  return page;
 }
 
 export class Store {
@@ -175,14 +182,22 @@ export class Store {
     }
     const rows = this.sql.all`SELECT pos,seq,message FROM notices WHERE watch=${id} AND pos>${pos}
                               ORDER BY pos LIMIT ${PAGE}`;
-    const notices = rows.map(({ seq, message }) => {
+    const notices = rows.map(({seq, message}) => {
       const notice = { id: `${id}:${seq}`, watch: id, seq };
       if (message !== null) notice.message = message;
       return notice;
     });
-    const page = { notices, next: rows.length ? `n${rows.at(-1).pos}` : after };
-    if (untilDone && !notices.length && watch.state !== 'active' && watch.pending === null) page.done = true;
-    return page;
+    return noticePage(watch, notices, rows.length ? `n${rows.at(-1).pos}` : after, untilDone);
+  }
+
+  live(id, afterSeq = 0) {
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error('Expected a nonnegative live sequence');
+    const watch = this.get(id);
+    const rows = this.sql.all`SELECT n.seq, coalesce(c.record, c.after) AS path, n.message FROM notices n
+                              JOIN changes c ON c.watch=n.watch AND c.seq=n.seq
+                              WHERE n.watch=${id} AND n.seq>${afterSeq} ORDER BY n.seq LIMIT ${PAGE}`;
+    const notices = rows.map(({seq, path, message}) => message === null ? {seq, path} : {seq, path, message});
+    return noticePage(watch, notices, notices.at(-1)?.seq ?? afterSeq, true);
   }
 
   replay(id, afterSeq = 0, limit) {
@@ -191,6 +206,26 @@ export class Store {
     // Take the high-water mark now, even if the caller delays reading its first row.
     const { seq } = this.get(id);
     return this.readChanges(id, limit === undefined ? seq : Math.min(seq, afterSeq + limit), afterSeq);
+  }
+
+  recentChanges(id, {seq = [1, Number.MAX_SAFE_INTEGER], only, limit = 24, afterSeq} = {}) {
+    if (afterSeq !== undefined) throw new Error('Use seq to select a newest-first history range');
+    if (only !== undefined && only !== 'alerts') throw new Error('Expected only="alerts"');
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 64) throw new Error('Expected a history limit from 1 to 64');
+    const range = Array.isArray(seq) ? seq : [seq, seq];
+    const [first, last] = range;
+    if (range.length !== 2 || !Number.isSafeInteger(first) || first < 1 || !Number.isSafeInteger(last) || last < first) {
+      throw new Error('Expected a positive sequence or an inclusive [first, last] range');
+    }
+
+    this.get(id);
+    // Both views seek by (watch, seq). Sparse alerts fetch evidence only for matching notices.
+    const rows = only === 'alerts'
+      ? this.sql.all`SELECT c.*, n.message FROM notices n JOIN changes c ON c.watch=n.watch AND c.seq=n.seq
+                     WHERE n.watch=${id} AND n.seq BETWEEN ${first} AND ${last} ORDER BY n.seq DESC LIMIT ${limit}`
+      : this.sql.all`SELECT * FROM changes WHERE watch=${id} AND seq BETWEEN ${first} AND ${last}
+                     ORDER BY seq DESC LIMIT ${limit}`;
+    return rows.map(unpackChange);
   }
 
   *readChanges(id, highWater, last) {

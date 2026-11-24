@@ -29,12 +29,17 @@ export function connect(socketPath) {
     listen: spec => json(socketPath, 'listen', {cwd: process.cwd(), ...spec}),
     poll: (watch, after, signal) => json(socketPath, 'poll', {watch, after}, signal),
     stop: watch => json(socketPath, 'stop', {watch}),
-    replay(watch, {afterSeq, limit, signal} = {}) {
-      const response = request(socketPath, 'replay', {watch, afterSeq, limit}, signal);
+    replay(watch, {afterSeq, newestFirst, seq, only, limit, signal} = {}) {
+      const response = request(socketPath, 'replay', {watch, afterSeq, newestFirst, seq, only, limit}, signal);
       // A caller can hold a finite replay before starting to iterate it.
       response.catch(() => {});
       return (async function* () {
         const res = await response;
+        // Older daemons ignore these selectors and would return unrelated changes.
+        if (newestFirst && res.headers['listener-replay-order'] !== 'newest-first') {
+          res.destroy();
+          throw new Error('Restart the listener daemon to enable newest-first history');
+        }
         const rows = createInterface({input: res, crlfDelay: Infinity});
         try {
           for await (const row of rows) yield JSON.parse(row);
@@ -47,12 +52,14 @@ export function connect(socketPath) {
   };
 }
 
-// Harness side: handle a whole page before advancing its delivery cursor.
-export async function follow(socket, watch, after, deliver, signal) {
+// Advance after delivery: a watch sequence for live evidence, an opaque cursor for SDK notices.
+export async function follow(socket, watch, after, deliver, signal, {evidence} = {}) {
   while (!signal?.aborted) {
     let page;
     try {
-      page = await json(socket, 'wait', {watch, after, untilDone: true}, signal);
+      page = evidence
+        ? await json(socket, 'live', {watch, afterSeq: after}, signal)
+        : await json(socket, 'wait', {watch, after, untilDone: true}, signal);
     } catch (error) {
       if (signal?.aborted) return;
       if (!['ECONNREFUSED', 'ENOENT', 'ECONNRESET', 'EPIPE'].includes(error.code)) throw error;
