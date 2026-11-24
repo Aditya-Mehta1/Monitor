@@ -22,9 +22,3 @@ Monitor({action: "stop", name})                             → {name, status}
 ```
 
 While connected, the owning session receives one `{name, seq, path, message?}` ping per match. Pi starts a turn when idle or queues the ping when busy. Open `path` for the saved content. If the watched resource is deleted, `path` is `null`.
-
-## Details
-
-- Pi names each watch. For example, `blockers` and `deadlines` can both watch `rollout.md`. One filter detects new blockers. The other detects deadline changes.
-- Each ping names the watch that matched. Stopping `blockers` leaves `deadlines` running.
-- Only the session that started a watch receives its pings. Any Pi session in the same workspace can list the watch or read its history by name.
